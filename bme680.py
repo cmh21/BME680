@@ -48,6 +48,7 @@ class bme680:
     CHIPID = 0x61
 
     REG_CHIPID = 0xD0
+    REG_VARIANT = 0xF0
     COEFF_ADDR1 = 0x89
     COEFF_ADDR2 = 0xE1
     RES_HEAT_0 = 0x5A
@@ -68,21 +69,17 @@ class bme680:
 
     OS_1X = 1
     OS_2X = 2
-    OS_4X = 4
-    OS_8X = 8
-    OS_16X = 16
-
-    SAMPLERATES = (0, OS_1X, OS_2X, OS_4X, OS_8X, OS_16X)
+    OS_4X = 3
+    OS_8X = 4
+    OS_16X = 5
 
     FILT_1 = 1
-    FILT_3 = 3
-    FILT_7 = 7
-    FILT_15 = 15
-    FILT_31 = 31
-    FILT_63 = 63
-    FILT_127 = 127
-
-    FILTERSIZES = (0, FILT_1, FILT_3, FILT_7, FILT_15, FILT_31, FILT_63, FILT_127)
+    FILT_3 = 2
+    FILT_7 = 3
+    FILT_15 = 4
+    FILT_31 = 5
+    FILT_63 = 6
+    FILT_127 = 7
 
     RUNGAS = 0x10
 
@@ -148,6 +145,8 @@ class bme680:
         if chip_id != bme680.CHIPID:
             raise RuntimeError("Failed to find BME680! Chip ID 0x%x" % chip_id)
 
+        self.variant = self._read_byte(bme680.REG_VARIANT)
+
         self._read_calibration()
 
         # set up heater
@@ -157,12 +156,7 @@ class bme680:
         # Pressure in hectoPascals at sea level. Used to calibrate ``altitude``.
         self.sea_level_pressure = 1013.25
 
-        # private copies of chip registers
-        self._pressure_oversample = None
-        self._temp_oversample = None
-        self._humidity_oversample = None
-        self._filter = None
-
+        # local copies of raw data from sensor chip
         self._adc_pres = None
         self._adc_temp = None
         self._adc_hum = None
@@ -170,69 +164,70 @@ class bme680:
         self._gas_range = None
         self._t_fine = None
 
+        self._pressure_oversample = None
+        self._temp_oversample = None
+        self._humidity_oversample = None
+        self._filter_size = None
+
         # Default oversampling and filter register values,
         # set via the property setters below.
         self.pressure_oversample = bme680.OS_4X
         self.temp_oversample = bme680.OS_8X
         self.humidity_oversample = bme680.OS_2X
-        self.filter = bme680.FILT_3
+        self.filter_size = bme680.FILT_3
 
     @property
     def pressure_oversample(self):
         """The oversampling for pressure sensor"""
-        return bme680.SAMPLERATES[self._pressure_oversample]
+        return self._pressure_oversample
 
     @pressure_oversample.setter
-    def pressure_oversample(self, sample_rate):
-        if sample_rate in bme680.SAMPLERATES:
-            self._pressure_oversample = bme680.SAMPLERATES.index(sample_rate)
-        else:
-            raise RuntimeError("Invalid oversample")
+    def pressure_oversample(self, os_factor):
+        if os_factor < bme680.OS_1X or os_factor > bme680.OS_16X:
+            raise ValueError("Invalid oversample factor {}.".format(os_factor))
+        self._pressure_oversample = os_factor
 
     @property
     def humidity_oversample(self):
         """The oversampling for humidity sensor"""
-        return bme680.SAMPLERATES[self._humidity_oversample]
+        return self._humidity_oversample
 
     @humidity_oversample.setter
-    def humidity_oversample(self, sample_rate):
-        if sample_rate in bme680.SAMPLERATES:
-            self._humidity_oversample = bme680.SAMPLERATES.index(sample_rate)
-        else:
-            raise RuntimeError("Invalid oversample")
+    def humidity_oversample(self, os_factor: int):
+        if os_factor < bme680.OS_1X or os_factor > bme680.OS_16X:
+            raise ValueError("Invalid oversample factor {}.".format(os_factor))
+        self._humidity_oversample = os_factor
 
     @property
     def temperature_oversample(self):
         """The oversampling for temperature sensor"""
-        return bme680.SAMPLERATES[self._temp_oversample]
+        return self._temp_oversample
 
     @temperature_oversample.setter
-    def temperature_oversample(self, sample_rate):
-        if sample_rate in bme680.SAMPLERATES:
-            self._temp_oversample = bme680.SAMPLERATES.index(sample_rate)
-        else:
-            raise RuntimeError("Invalid oversample")
+    def temperature_oversample(self, os_factor: int):
+        if os_factor < bme680.OS_1X or os_factor > bme680.OS_16X:
+            raise ValueError("Invalid oversample factor {}.".format(os_factor))
+        self._temp_oversample = os_factor
 
     @property
     def filter_size(self):
         """The filter size for the built in IIR filter"""
-        return bme680.FILTERSIZES[self._filter]
+        return self._filter_size
 
     @filter_size.setter
-    def filter_size(self, size):
-        if size in bme680.FILTERSIZES:
-            self._filter = bme680.FILTERSIZES[size]
-        else:
-            raise RuntimeError("Invalid size")
+    def filter_size(self, size: int):
+        if size < bme680.FILT_1 or size > bme680.FILT_127:
+            raise ValueError("Invalid filter length {}.".format(size))
+        self._filter_size = size
 
     @property
-    def temperature(self):
+    def temperature(self) -> float:
         """The compensated temperature in degrees celsius."""
         calc_temp = ((self._t_fine * 5) + 128) / 256
         return calc_temp / 100
 
     @property
-    def pressure(self):
+    def pressure(self) -> float:
         """The barometric pressure in hectoPascals"""
         var1 = (self._t_fine / 2) - 64000
         var2 = ((var1 / 4) * (var1 / 4)) / 2048
@@ -258,7 +253,7 @@ class bme680:
         return calc_pres / 100
 
     @property
-    def humidity(self):
+    def humidity(self) -> float:
         """The relative humidity in RH %"""
         temp_scaled = ((self._t_fine * 5) + 128) / 256
         var1 = (self._adc_hum - (self._humidity_calibration[0] * 16)) - (
@@ -296,7 +291,7 @@ class bme680:
         return calc_hum
 
     @property
-    def altitude(self):
+    def altitude(self) -> float:
         """The altitude based on current ``pressure`` vs the sea level pressure
         (``sea_level_pressure``) - which you must enter ahead of time)"""
         pressure = self.pressure  # in Si units for hPascal
@@ -305,7 +300,7 @@ class bme680:
         )
 
     @property
-    def gas(self):
+    def gas(self) -> float:
         """The gas resistance in ohms"""
         var1 = (
             (1340 + (5 * self._sw_err)) * (bme680.LOOKUP_TABLE_1[self._gas_range])
@@ -320,7 +315,7 @@ class bme680:
         calculations"""
 
         # set filter
-        self._write(bme680.REG_CONFIG, [self.filter << 2])
+        self._write(bme680.REG_CONFIG, [self._filter_size << 2])
         # turn on temp oversample & pressure oversample
         self._write(
             bme680.CTRL_MEAS,
